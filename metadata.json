@@ -1,0 +1,5 @@
+{
+  "name": "SmartRename PDF - AI Invoice Organizer",
+  "description": "A professional tool to batch rename PDF invoices using AI-extracted information like merchant, date, and amount.",
+  "requestFramePermissions": []
+}
