@@ -1,4 +1,6 @@
 
+export type AIProvider = 'glm' | 'gemini' | 'qwen';
+
 export interface ExtractedInfo {
   date: string;
   merchant: string;
@@ -9,7 +11,7 @@ export interface ExtractedInfo {
 }
 
 export interface PDFFile {
-  handle?: FileSystemFileHandle; // Optional for fallback mode
+  handle?: FileSystemFileHandle;
   file: File;
   originalName: string;
   newName: string;
@@ -21,4 +23,5 @@ export interface PDFFile {
 export interface RenameConfig {
   template: string;
   sanitize: boolean;
+  provider: AIProvider;
 }

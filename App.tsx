@@ -9,89 +9,63 @@ import {
   AlertCircle, 
   Loader2,
   ChevronRight,
-  Info,
-  Tag,
-  Eraser
+  Eraser,
+  Cpu,
+  Zap,
+  Trash2,
+  Files
 } from 'lucide-react';
-import { PDFFile, RenameConfig } from './types';
-import { extractInvoiceData } from './services/geminiService';
+import { PDFFile, RenameConfig, AIProvider } from './types';
+import { extractInvoiceData } from './services/aiService';
 import { convertPdfToImage, applyTemplate, sanitizeFilename } from './utils/pdfProcessor';
 
 const App: React.FC = () => {
   const [files, setFiles] = useState<PDFFile[]>([]);
   const [config, setConfig] = useState<RenameConfig>({
     template: '{date}_{merchant}_{amount}',
-    sanitize: true
+    sanitize: true,
+    provider: 'glm'
   });
   const [isProcessing, setIsProcessing] = useState(false);
-  const [directoryHandle, setDirectoryHandle] = useState<FileSystemDirectoryHandle | null>(null);
-  const [usingFallback, setUsingFallback] = useState(false);
   
   const templateInputRef = useRef<HTMLInputElement>(null);
-  const fallbackInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFiles = (fileList: FileList | File[]) => {
     const pdfFiles: PDFFile[] = [];
     Array.from(fileList).forEach(file => {
       if (file.name.toLowerCase().endsWith('.pdf')) {
-        pdfFiles.push({
-          file,
-          originalName: file.name,
-          newName: file.name,
-          status: 'pending'
-        });
-      }
-    });
-    setFiles(pdfFiles);
-  };
-
-  const selectFolder = async () => {
-    try {
-      const handle = await (window as any).showDirectoryPicker({
-        mode: 'readwrite'
-      });
-      setDirectoryHandle(handle);
-      setUsingFallback(false);
-      
-      const pdfFiles: PDFFile[] = [];
-      for await (const entry of handle.values()) {
-        if (entry.kind === 'file' && entry.name.toLowerCase().endsWith('.pdf')) {
-          const file = await (entry as FileSystemFileHandle).getFile();
+        // 避免重复添加
+        if (!files.some(f => f.originalName === file.name)) {
           pdfFiles.push({
-            handle: entry as FileSystemFileHandle,
             file,
-            originalName: entry.name,
-            newName: entry.name,
+            originalName: file.name,
+            newName: file.name,
             status: 'pending'
           });
         }
       }
-      setFiles(pdfFiles);
-    } catch (err: any) {
-      if (err.name === 'SecurityError' || err.message.includes('Cross origin')) {
-        console.warn('FileSystem API blocked by iframe constraints. Using fallback input.');
-        setUsingFallback(true);
-        fallbackInputRef.current?.click();
-      } else if (err.name !== 'AbortError') {
-        console.error('Selection failed:', err);
-      }
-    }
+    });
+    setFiles(prev => [...prev, ...pdfFiles]);
+  };
+
+  const clearFiles = () => {
+    if (isProcessing) return;
+    setFiles([]);
   };
 
   const insertTag = (tag: string) => {
     const input = templateInputRef.current;
     if (!input) return;
-
     const start = input.selectionStart || 0;
     const end = input.selectionEnd || 0;
     const text = input.value;
     
-    // 自动下划线逻辑：如果插入点前有内容且不是下划线，则补一个下划线
-    const prefix = (start > 0 && text[start - 1] !== '_' && text[start - 1] !== '{') ? '_' : '';
-    const tagContent = `${prefix}{${tag}}`;
+    // 智能判断是否需要下划线前缀
+    const needsPrefix = (start > 0 && text[start - 1] !== '_' && text[start - 1] !== '{');
+    const tagContent = `${needsPrefix ? '_' : ''}{${tag}}`;
     
     const newText = text.substring(0, start) + tagContent + text.substring(end);
-    
     setConfig({ ...config, template: newText });
     
     setTimeout(() => {
@@ -104,242 +78,252 @@ const App: React.FC = () => {
   const processFiles = async () => {
     if (isProcessing || files.length === 0) return;
     setIsProcessing(true);
+    
+    // 创建一个副本以便逐步更新状态
+    const currentFiles = [...files];
 
-    const updatedFiles = [...files];
-
-    for (let i = 0; i < updatedFiles.length; i++) {
-      if (updatedFiles[i].status === 'completed') continue;
-
+    for (let i = 0; i < currentFiles.length; i++) {
+      if (currentFiles[i].status === 'completed') continue;
+      
       try {
-        updatedFiles[i].status = 'processing';
-        setFiles([...updatedFiles]);
+        currentFiles[i].status = 'processing';
+        setFiles([...currentFiles]);
 
-        const imageBase64 = await convertPdfToImage(updatedFiles[i].file);
-        const extracted = await extractInvoiceData(imageBase64);
-        updatedFiles[i].extracted = extracted;
+        const imageBase64 = await convertPdfToImage(currentFiles[i].file);
+        const extracted = await extractInvoiceData(imageBase64, config.provider);
+        currentFiles[i].extracted = extracted;
 
         let baseNewName = applyTemplate(config.template, extracted);
-        if (config.sanitize) {
-          baseNewName = sanitizeFilename(baseNewName);
-        }
+        if (config.sanitize) baseNewName = sanitizeFilename(baseNewName);
         const newFileName = baseNewName.toLowerCase().endsWith('.pdf') ? baseNewName : `${baseNewName}.pdf`;
-        updatedFiles[i].newName = newFileName;
+        currentFiles[i].newName = newFileName;
 
-        if (updatedFiles[i].handle) {
-          try {
-            if ((updatedFiles[i].handle as any).move) {
-              await (updatedFiles[i].handle as any).move(newFileName);
-            } else if (directoryHandle) {
-              const newFileHandle = await directoryHandle.getFileHandle(newFileName, { create: true });
-              const writable = await newFileHandle.createWritable();
-              await writable.write(updatedFiles[i].file);
-              await writable.close();
-              await directoryHandle.removeEntry(updatedFiles[i].originalName);
-            }
-            updatedFiles[i].status = 'completed';
-          } catch (renameErr: any) {
-            updatedFiles[i].status = 'error';
-            updatedFiles[i].error = "系统权限错误或文件被占用: " + renameErr.message;
-          }
-        } else {
-          updatedFiles[i].status = 'completed';
-        }
+        currentFiles[i].status = 'completed';
       } catch (err: any) {
-        updatedFiles[i].status = 'error';
-        updatedFiles[i].error = "解析出错: " + err.message;
+        currentFiles[i].status = 'error';
+        currentFiles[i].error = err.message || "处理失败";
       }
-      setFiles([...updatedFiles]);
+      setFiles([...currentFiles]);
     }
     setIsProcessing(false);
   };
 
-  const tags = [
-    { id: 'date', label: '日期' },
-    { id: 'merchant', label: '商家名称' },
-    { id: 'invoice', label: '发票内容' },
-    { id: 'month', label: '月份' },
-    { id: 'amount', label: '金额' },
-    { id: 'currency', label: '货币' }
+  // 检查占位符是否在模板中被使用
+  const isTagUsed = (tag: string) => config.template.includes(`{${tag}}`);
+
+  const modelOptions: { id: AIProvider; name: string; desc: string; free?: boolean }[] = [
+    { id: 'glm', name: 'GLM-4V-Flash', desc: '智谱AI - 高速视觉识别', free: true },
+    { id: 'gemini', name: 'Gemini 3 Flash', desc: 'Google - 顶级多模态' },
+    { id: 'qwen', name: 'Qwen-VL-Plus', desc: '通义千问 - 视觉精调' }
   ];
 
+  const tags = ['date', 'merchant', 'amount', 'month', 'invoice', 'currency'];
+
   return (
-    <div className="flex h-screen bg-[#F1F5F9] overflow-hidden">
+    <div className="flex h-screen bg-[#F8FAFC] overflow-hidden text-slate-900">
+      {/* 隐藏的文件选择器 */}
       <input 
         type="file" 
-        multiple
-        ref={fallbackInputRef}
-        onChange={(e) => e.target.files && handleFiles(e.target.files)}
-        className="hidden"
-        accept=".pdf"
+        multiple 
+        ref={fileInputRef} 
+        onChange={(e) => e.target.files && handleFiles(e.target.files)} 
+        className="hidden" 
+        accept=".pdf" 
       />
 
-      <aside className="w-80 border-r border-slate-200 bg-white p-6 flex flex-col gap-8 shadow-sm overflow-y-auto">
+      <aside className="w-80 border-r border-slate-200 bg-white p-6 flex flex-col gap-6 shadow-sm overflow-y-auto">
         <div className="flex items-center gap-3">
           <div className="p-2.5 bg-indigo-600 rounded-xl shadow-lg shadow-indigo-100">
-            <FileText className="text-white w-5 h-5" />
+            <Zap className="text-white w-5 h-5" fill="white" />
           </div>
-          <h1 className="text-lg font-black tracking-tighter text-slate-800 uppercase">Smart PDF Rename</h1>
+          <h1 className="text-lg font-black tracking-tighter text-slate-800 uppercase">AI Smart Rename</h1>
         </div>
 
-        <div className="space-y-6">
-          <section className="space-y-4">
-            <h2 className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2">
-              <SettingsIcon size={12} /> 命名规则设置
-            </h2>
-            
-            <div className="space-y-4">
-              <div className="relative group">
-                <input 
-                  ref={templateInputRef}
-                  type="text"
-                  value={config.template}
-                  onChange={(e) => setConfig({ ...config, template: e.target.value })}
-                  className="w-full pl-3 pr-10 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none text-sm font-mono transition-all"
-                  placeholder="例如: {date}_{merchant}"
-                />
-                <button 
-                  onClick={() => setConfig({...config, template: ''})}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 hover:text-rose-500 transition-colors"
-                >
-                  <Eraser size={16} />
-                </button>
-              </div>
-
-              <div className="space-y-2.5">
-                <p className="text-[11px] font-bold text-slate-500 flex items-center gap-1.5 px-1">
-                  <Tag size={12} /> 点击占位符 (自动补下划线):
-                </p>
-                <div className="grid grid-cols-2 gap-2">
-                  {tags.map(tag => (
-                    <button
-                      key={tag.id}
-                      onClick={() => insertTag(tag.id)}
-                      className="px-3 py-2 bg-white text-slate-600 text-[11px] font-bold rounded-lg border border-slate-200 hover:border-indigo-500 hover:text-indigo-600 hover:bg-indigo-50/50 transition-all active:scale-95 shadow-sm"
-                    >
-                      {tag.label}
-                    </button>
-                  ))}
+        {/* 模型选择 */}
+        <section className="space-y-4">
+          <h2 className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2">
+            <Cpu size={12} /> AI 模型选择
+          </h2>
+          <div className="grid grid-cols-1 gap-2">
+            {modelOptions.map((opt) => (
+              <button
+                key={opt.id}
+                onClick={() => setConfig({ ...config, provider: opt.id })}
+                className={`p-3 rounded-xl border text-left transition-all ${
+                  config.provider === opt.id 
+                  ? 'border-indigo-600 bg-indigo-50/50 ring-1 ring-indigo-600' 
+                  : 'border-slate-100 bg-slate-50 hover:bg-white hover:border-slate-300'
+                }`}
+              >
+                <div className="flex justify-between items-center mb-0.5">
+                  <span className={`text-[12px] font-bold ${config.provider === opt.id ? 'text-indigo-700' : 'text-slate-700'}`}>
+                    {opt.name}
+                  </span>
+                  {opt.free && <span className="text-[8px] bg-emerald-500 text-white px-1.5 py-0.5 rounded-full font-black">免费</span>}
                 </div>
-              </div>
-            </div>
-            
-            <div className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100">
-              <input 
-                type="checkbox" 
-                id="sanitize"
-                checked={config.sanitize}
-                onChange={(e) => setConfig({ ...config, sanitize: e.target.checked })}
-                className="w-4 h-4 text-indigo-600 rounded focus:ring-indigo-500 cursor-pointer"
-              />
-              <label htmlFor="sanitize" className="text-[11px] text-slate-500 cursor-pointer font-bold uppercase tracking-tight">清理非法字符 (Windows)</label>
-            </div>
-          </section>
-
-          <div className="p-4 bg-indigo-50 border border-indigo-100 rounded-2xl space-y-2">
-            <div className="flex items-center gap-2 text-indigo-700 font-bold text-[10px] uppercase">
-              <Info size={14} />
-              <span>部署建议</span>
-            </div>
-            <p className="text-[10px] text-indigo-600 leading-relaxed font-medium">
-              在本地 localhost 环境下运行可获得真实的文件重命名权限。
-            </p>
+                <p className="text-[10px] text-slate-400 font-medium">{opt.desc}</p>
+              </button>
+            ))}
           </div>
-        </div>
+        </section>
 
-        <div className="mt-auto pt-6">
-           <button 
-            onClick={selectFolder}
-            className="w-full flex items-center justify-center gap-2 px-4 py-4 bg-slate-900 text-white rounded-2xl font-black hover:bg-indigo-600 transition-all shadow-xl active:scale-95"
+        {/* 命名模板 */}
+        <section className="space-y-4">
+          <h2 className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2">
+            <SettingsIcon size={12} /> 命名模板
+          </h2>
+          <div className="relative">
+            <input 
+              ref={templateInputRef}
+              type="text"
+              value={config.template}
+              onChange={(e) => setConfig({ ...config, template: e.target.value })}
+              placeholder="请输入命名模板..."
+              className="w-full pl-3 pr-10 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none text-xs font-mono transition-all"
+            />
+            <button 
+              onClick={() => setConfig({...config, template: ''})} 
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 hover:text-rose-500 transition-colors"
+            >
+              <Eraser size={14} />
+            </button>
+          </div>
+          <div className="grid grid-cols-3 gap-1.5">
+            {tags.map(tag => (
+              <button 
+                key={tag} 
+                onClick={() => insertTag(tag)} 
+                className={`px-2 py-1.5 text-[10px] font-bold rounded-lg border transition-all ${
+                  isTagUsed(tag)
+                  ? 'bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-100'
+                  : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-500 hover:text-indigo-600'
+                }`}
+              >
+                {tag}
+              </button>
+            ))}
+          </div>
+        </section>
+
+        {/* 操作按钮 */}
+        <div className="mt-auto space-y-3">
+          <button 
+            onClick={() => fileInputRef.current?.click()}
+            className="w-full flex items-center justify-center gap-2 px-4 py-4 bg-slate-900 text-white rounded-2xl font-black hover:bg-slate-800 transition-all shadow-lg active:scale-95"
           >
-            <FolderOpen size={18} />
-            {files.length > 0 ? '重新选择' : '选择 PDF 文件夹'}
+            <Files size={18} />
+            选择 PDF 文件
           </button>
         </div>
       </aside>
 
-      <main className="flex-1 flex flex-col min-w-0 bg-white m-4 rounded-[2.5rem] overflow-hidden border border-slate-200 shadow-2xl">
-        <header className="px-10 py-8 border-b border-slate-50 flex items-center justify-between">
+      <main className="flex-1 flex flex-col m-4 rounded-[2.5rem] overflow-hidden border border-slate-200 shadow-2xl bg-white">
+        <header className="px-10 py-8 border-b border-slate-100 flex items-center justify-between bg-white">
           <div>
-            <h2 className="text-2xl font-black text-slate-800">发票处理中心</h2>
-            <div className="flex items-center gap-2 mt-1">
-              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">
-                {files.length} 个项目
+            <h2 className="text-2xl font-black text-slate-800 tracking-tight">重命名工作区</h2>
+            <div className="flex items-center gap-3 mt-1.5">
+              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">{files.length} 个文件</span>
+              <div className="w-1 h-1 bg-slate-300 rounded-full"></div>
+              <span className="text-[11px] font-bold text-indigo-500 uppercase tracking-widest">
+                使用模型: {modelOptions.find(o => o.id === config.provider)?.name}
               </span>
-              {usingFallback && (
-                <span className="text-[10px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-bold">Web 兼容模式</span>
-              )}
             </div>
           </div>
-          <button 
-            disabled={files.length === 0 || isProcessing}
-            onClick={processFiles}
-            className={`flex items-center gap-3 px-8 py-4 rounded-2xl font-black transition-all shadow-lg ${
-              files.length === 0 || isProcessing
-              ? 'bg-slate-100 text-slate-300 shadow-none cursor-not-allowed' 
-              : 'bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 shadow-indigo-100'
-            }`}
-          >
-            {isProcessing ? <Loader2 className="animate-spin" size={20} /> : <Play size={20} />}
-            {isProcessing ? '正在处理...' : '执行批量重命名'}
-          </button>
+          <div className="flex items-center gap-3">
+            {files.length > 0 && (
+              <button 
+                onClick={clearFiles}
+                disabled={isProcessing}
+                className="flex items-center gap-2 px-5 py-4 rounded-2xl font-bold text-slate-500 hover:bg-slate-50 transition-all disabled:opacity-30"
+              >
+                <Trash2 size={18} />
+                清空列表
+              </button>
+            )}
+            <button 
+              disabled={files.length === 0 || isProcessing}
+              onClick={processFiles}
+              className={`flex items-center gap-3 px-8 py-4 rounded-2xl font-black transition-all shadow-xl active:scale-95 ${
+                files.length === 0 || isProcessing 
+                ? 'bg-slate-100 text-slate-300' 
+                : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200'
+              }`}
+            >
+              {isProcessing ? <Loader2 className="animate-spin" size={20} /> : <Play size={20} fill="currentColor" />}
+              {isProcessing ? '处理中...' : '一键批量命名'}
+            </button>
+          </div>
         </header>
 
-        <div className="flex-1 overflow-auto px-6">
+        <div className="flex-1 overflow-auto px-10 pb-10">
           {files.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-slate-300 p-20">
-              <div className="w-20 h-20 bg-slate-50 rounded-[2rem] flex items-center justify-center mb-6 border border-slate-100">
-                <FolderOpen size={32} className="text-slate-200" />
+            <div className="h-full flex flex-col items-center justify-center text-slate-300 transition-opacity duration-500">
+              <div className="p-8 bg-slate-50 rounded-full mb-6">
+                <FileText size={64} className="text-slate-200" />
               </div>
-              <p className="text-lg font-black text-slate-400">尚未加载 PDF</p>
-              <p className="text-sm mt-1 text-slate-300 font-medium">点击左侧按钮导入文件夹或文件</p>
+              <p className="text-lg font-black text-slate-400 uppercase tracking-widest">暂无文件</p>
+              <p className="text-sm font-medium text-slate-400 mt-2">请从左侧点击选择需要重命名的发票</p>
             </div>
           ) : (
             <table className="w-full text-left border-separate border-spacing-y-3">
               <thead>
                 <tr className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">
                   <th className="px-6 py-2">状态</th>
-                  <th className="px-6 py-2">原始名称</th>
-                  <th className="px-6 py-2">识别信息</th>
-                  <th className="px-6 py-2">目标名称</th>
+                  <th className="px-6 py-2">原始文件名</th>
+                  <th className="px-6 py-2">提取信息</th>
+                  <th className="px-6 py-2">重命名预览</th>
                 </tr>
               </thead>
               <tbody>
                 {files.map((file, idx) => (
-                  <tr key={idx} className="bg-white border border-slate-100 shadow-sm rounded-2xl overflow-hidden group">
+                  <tr key={idx} className="group bg-white border border-slate-100 hover:border-indigo-100 shadow-sm rounded-2xl transition-all duration-300">
                     <td className="px-6 py-5 rounded-l-2xl border-y border-l border-slate-50">
-                      {file.status === 'pending' && <span className="text-[10px] font-black text-slate-400 flex items-center gap-2">准备就绪</span>}
-                      {file.status === 'processing' && <span className="text-[10px] font-black text-indigo-500 flex items-center gap-2"><Loader2 size={12} className="animate-spin" /> 处理中</span>}
-                      {file.status === 'completed' && <span className="text-[10px] font-black text-emerald-500 flex items-center gap-2"><CheckCircle2 size={12} /> 已完成</span>}
+                      {file.status === 'pending' && (
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-black bg-slate-100 text-slate-500 uppercase">等待中</span>
+                      )}
+                      {file.status === 'processing' && (
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-black bg-indigo-50 text-indigo-600 uppercase animate-pulse">
+                          <Loader2 size={10} className="animate-spin mr-1.5" /> 处理中
+                        </span>
+                      )}
+                      {file.status === 'completed' && (
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-600 uppercase">
+                          <CheckCircle2 size={10} className="mr-1.5" /> 已完成
+                        </span>
+                      )}
                       {file.status === 'error' && (
-                        <div className="group/err relative inline-block">
-                          <span className="text-[10px] font-black text-rose-500 flex items-center gap-2 cursor-help"><AlertCircle size={12} /> 失败</span>
-                          <div className="absolute left-0 bottom-full mb-3 w-56 bg-slate-900 text-white text-[10px] p-3 rounded-xl hidden group-hover/err:block z-50 shadow-2xl">
-                            {file.error}
-                            <div className="absolute top-full left-4 border-8 border-transparent border-t-slate-900"></div>
-                          </div>
-                        </div>
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-black bg-rose-50 text-rose-600 uppercase" title={file.error}>
+                          <AlertCircle size={10} className="mr-1.5" /> 失败
+                        </span>
                       )}
                     </td>
                     <td className="px-6 py-5 border-y border-slate-50">
-                      <div className="text-xs font-bold text-slate-600 truncate max-w-[180px]" title={file.originalName}>
-                        {file.originalName}
+                      <div className="flex flex-col">
+                        <span className="text-[12px] font-bold text-slate-700 truncate max-w-[200px]">{file.originalName}</span>
+                        <span className="text-[10px] text-slate-400 font-medium">PDF Document</span>
                       </div>
                     </td>
                     <td className="px-6 py-5 border-y border-slate-50">
                       {file.extracted ? (
-                        <div className="flex gap-2">
-                          <span className="text-[9px] bg-slate-100 text-slate-500 px-2 py-1 rounded-md font-bold truncate max-w-[100px]">{file.extracted.merchant}</span>
-                          <span className="text-[9px] bg-emerald-50 text-emerald-600 px-2 py-1 rounded-md font-bold">{file.extracted.currency}{file.extracted.amount}</span>
+                        <div className="flex flex-wrap gap-1.5">
+                          <div className="flex items-center gap-1 bg-slate-50 px-2 py-1 rounded-lg border border-slate-100">
+                            <span className="text-[9px] font-black text-slate-400 uppercase">商户</span>
+                            <span className="text-[11px] font-bold text-slate-700">{file.extracted.merchant}</span>
+                          </div>
+                          <div className="flex items-center gap-1 bg-indigo-50 px-2 py-1 rounded-lg border border-indigo-100">
+                            <span className="text-[9px] font-black text-indigo-300 uppercase">金额</span>
+                            <span className="text-[11px] font-black text-indigo-600">{file.extracted.currency} {file.extracted.amount}</span>
+                          </div>
                         </div>
                       ) : (
-                        <span className="text-[10px] text-slate-200 font-bold italic">等待中</span>
+                        <span className="text-[10px] font-medium text-slate-300 italic">待识别...</span>
                       )}
                     </td>
                     <td className="px-6 py-5 rounded-r-2xl border-y border-r border-slate-50">
                       <div className="flex items-center gap-3">
-                        <ChevronRight size={14} className="text-slate-200" />
-                        <span className={`text-xs font-mono font-bold truncate max-w-[200px] ${file.status === 'completed' ? 'text-indigo-600' : 'text-slate-300'}`}>
-                          {file.status === 'pending' ? '...' : file.newName}
+                        <ChevronRight size={14} className="text-slate-200 group-hover:text-indigo-300 transition-colors" />
+                        <span className={`text-[12px] font-mono font-bold transition-colors ${file.status === 'completed' ? 'text-indigo-600' : 'text-slate-300'}`}>
+                          {file.newName}
                         </span>
                       </div>
                     </td>
